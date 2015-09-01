@@ -1,29 +1,97 @@
-#include "..\chat_message.h"
-
+#include <algorithm>
+#include <cstdlib>
+#include <deque>
 #include <iostream>
-#include <boost\enable_shared_from_this.hpp>
+#include <list>
 #include <set>
 #include <boost\asio.hpp>
-#include <boost\bind.hpp>
 #include <boost\asio\ssl.hpp>
+#include <boost\bind.hpp>
+#include <boost\enable_shared_from_this.hpp>
+#include <boost\shared_ptr.hpp>
+#include "..\chat_message.h"
 
 //В целом непонятно: Зачем нужны placeholders? Они каким-то образом заменяют exceptions при обработке ошибок, но как?
 //А вообще похоже, что так затребовано в boost - через error'ы возвращается результат операции?.
 
-typedef boost::asio::ssl::stream<boost::asio::ip::tcp::socket> ssl_socket;
+typedef std::deque<ChatMessage> chatMessageQueue;
+typedef boost::asio::ssl::stream<boost::asio::ip::tcp::socket> sslSocket;
+
 namespace asio = boost::asio;
 namespace ssl = asio::ssl;
 
-class session {
+class ChatParticipant {
+public:
+	virtual ~ChatParticipant() {}
+	virtual void deliver(const ChatMessage& msg) = 0;
+	virtual char* name() {}
+	enum { maxNameLength = 20 };
+};
+
+typedef boost::shared_ptr<ChatParticipant> chatPartPtr;
+
+//------------------------------------------------------------------
+
+class ChatRoom {
+public:
+	//Returns "true" if there already is a participant with this name OR if name is too large
+	bool checkSameName(char* name) {
+		bool res = false;
+		if (strlen(name) > ChatParticipant::maxNameLength)
+			return true;
+		std::for_each(participants.begin(), participants.end(), boost::bind(
+			&ChatRoom::cmpName, _1, name, res));
+		return res;
+	}
+
+	void join(chatPartPtr participant) {
+		participants.insert(participant);
+		std::for_each(recentMessages.begin(), recentMessages.end(), boost::bind(
+			&ChatParticipant::deliver,
+			participant,
+			_1));
+		//TODO:Add notification about succecful join
+	}
+
+	void leave(chatPartPtr participant) {
+		participants.erase(participant);
+	}
+
+	void deliver(const ChatMessage& msg) {
+		recentMessages.push_back(msg);
+		while (recentMessages.size() > maxRecentMsgs)
+			recentMessages.pop_front();
+
+		std::for_each(participants.begin(), participants.end(), boost::bind(
+			&ChatParticipant::deliver, _1, boost::ref(msg)));
+	}
+
+private:
+	void cmpName(chatPartPtr participant, char* name, bool &res) {
+		res |= (strcmp(participant->name(), name) == 0);
+	}
+
+	std::set<chatPartPtr> participants;
+	enum { maxRecentMsgs = 100};
+	chatMessageQueue recentMessages;
+};
+
+//------------------------------------------------------------------
+
+class session 
+	: public ChatParticipant,
+	public boost::enable_shared_from_this<session> {
 public:
 	session(
 		asio::io_service &io_service,
-		ssl::context &context
-		) : socket_(io_service, context) {
+		ssl::context &context,
+		ChatRoom& roomG
+		) : socket_(io_service, context),
+		room(roomG) {
 	}
 
 	//Непонятно: что есть "нижний уровень"?
-	ssl_socket::lowest_layer_type& socket() {
+	sslSocket::lowest_layer_type& socket() {
 		return socket_.lowest_layer();
 	}
 
@@ -38,13 +106,14 @@ public:
 
 	void handle_handshake(const boost::system::error_code& error) {
 		if (!error) {
-			socket_.async_read_some(
-				asio::buffer(data_, max_length),
+			asio::async_read(
+				socket_,
+				asio::buffer(readMsg.data(), ChatMessage::headerLength),
 				boost::bind(
-					&session::handle_read,
-					this,
-					asio::placeholders::error,
-					asio::placeholders::bytes_transferred
+					&session::handle_read_header,
+					//TODO:Выяснить, что же конкретно делает shared from this и как оно работает
+					shared_from_this(),
+					asio::placeholders::error
 					));
 		}
 		else {
@@ -52,41 +121,72 @@ public:
 		}
 	}
 
-	void handle_read(
-		const boost::system::error_code& error,
-		size_t bytes_transferred) {
-		if (!error) {
-			asio::async_write(
+	void handle_read_header(
+		const boost::system::error_code& error) {
+		if (!error && readMsg.decode_header()) {
+			asio::async_read(
 				socket_,
-				asio::buffer(data_, bytes_transferred),
+				asio::buffer(readMsg.body(), readMsg.body_length()),
 				boost::bind(
-					&session::handle_write,
+					&session::handle_read_body,
 					this,
 					asio::placeholders::error));
 		}
 		else {
+			room.leave(shared_from_this());
 			delete this;
+		}
+	}
+
+	void handle_read_body(
+		const boost::system::error_code& error) {
+		if (!error) {
+			room.deliver(readMsg);
+			asio::async_read(
+				socket_,
+				asio::buffer(readMsg.data(), ChatMessage::headerLength),
+				boost::bind(&session::handle_read_header, shared_from_this(), asio::placeholders::error));
+		}
+		else {
+			room.leave(shared_from_this());
+			delete this;
+		}
+	}
+
+	void deliver(const ChatMessage& msg) {
+		//Шайтан-система: Т.к. происходит асинхронная запись, то записывает он (практически) всё сразу, и "буфер пуст" === кольцо handle_write уже было запущено. А если не было - так запустим.
+		bool writeInProgress = !writeMsgs.empty();
+		writeMsgs.push_back(msg);
+		if (!writeInProgress) {
+			asio::async_write(
+				socket_,
+				asio::buffer(writeMsgs.front().data(), writeMsgs.front().length()),
+				boost::bind(&session::handle_write, shared_from_this(), asio::placeholders::error));
 		}
 	}
 
 	void handle_write(const boost::system::error_code& error) {
 		if (!error) {
-			socket_.async_read_some(
-				asio::buffer(data_, max_length),
-				boost::bind(
-					&session::handle_read,
-					this,
-					asio::placeholders::error,
-					asio::placeholders::bytes_transferred));
+			writeMsgs.pop_front();
+			if (!writeMsgs.empty()) {
+				asio::async_write(
+					socket_,
+					asio::buffer(writeMsgs.front().data(), writeMsgs.front().length()),
+					boost::bind(&session::handle_write, shared_from_this(), asio::placeholders::error));
+			}
 		}
 		else {
+			room.leave(shared_from_this());
 			delete this;
 		}
 	}
 private:
-	ssl_socket socket_;
-	enum {max_length = 1024};
-	char data_[max_length];
+	sslSocket socket_;
+	ChatRoom& room;
+	ChatMessage readMsg;
+	chatMessageQueue writeMsgs;
+	enum {maxLength = 1024};
+	char dataArr[maxLength];
 };
 
 class server {
@@ -119,7 +219,7 @@ public:
 	}
 
 	void start_accept() {
-		session* new_session = new session(io_service_, context_);
+		session* new_session = new session(io_service_, context_, room);
 		acceptor_.async_accept(
 			new_session->socket(),
 			boost::bind(
@@ -129,12 +229,12 @@ public:
 				boost::asio::placeholders::error));
 	}
 
-	void handle_accept(session* new_session, const boost::system::error_code& error) {
+	void handle_accept(session* newSession, const boost::system::error_code& error) {
 		if (!error) {
-			new_session->start();
+			newSession->start();
 		}
 		else {
-			delete new_session;
+			delete newSession;
 		}
 
 		start_accept();
@@ -144,6 +244,7 @@ private:
 	asio::io_service& io_service_;
 	asio::ip::tcp::acceptor acceptor_;
 	ssl::context context_;
+	ChatRoom room;
 };
 
 int main(int argc, char* argv[]) {
