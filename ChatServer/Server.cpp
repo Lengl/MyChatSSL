@@ -11,9 +11,6 @@
 #include <boost\shared_ptr.hpp>
 #include "..\chat_message.h"
 
-//В целом непонятно: Зачем нужны placeholders? Они каким-то образом заменяют exceptions при обработке ошибок, но как?
-//А вообще похоже, что так затребовано в boost - через error'ы возвращается результат операции?.
-
 typedef std::deque<ChatMessage> chatMessageQueue;
 typedef boost::asio::ssl::stream<boost::asio::ip::tcp::socket> sslSocket;
 
@@ -40,7 +37,7 @@ public:
 		if (strlen(name) > ChatParticipant::maxNameLength)
 			return true;
 		std::for_each(participants.begin(), participants.end(), boost::bind(
-			&ChatRoom::cmpName, _1, name, res));
+			&ChatRoom::cmpName, this, _1, name, res));
 		return res;
 	}
 
@@ -72,13 +69,13 @@ private:
 	}
 
 	std::set<chatPartPtr> participants;
-	enum { maxRecentMsgs = 100};
+	enum { maxRecentMsgs = 100 };
 	chatMessageQueue recentMessages;
 };
 
 //------------------------------------------------------------------
 
-class session 
+class session
 	: public ChatParticipant,
 	public boost::enable_shared_from_this<session> {
 public:
@@ -185,20 +182,20 @@ private:
 	ChatRoom& room;
 	ChatMessage readMsg;
 	chatMessageQueue writeMsgs;
-	enum {maxLength = 1024};
+	enum { maxLength = 1024 };
 	char dataArr[maxLength];
 };
 
 class server {
 public:
 	server(asio::io_service &io_service, unsigned short port)
-		: 
+		:
 		io_service_(io_service),
 		acceptor_(
 			io_service,
 			asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)
 			),
-		context_(ssl::context::sslv23) 
+		context_(ssl::context::sslv23)
 	{
 		context_.set_options(
 			ssl::context::default_workarounds
@@ -256,7 +253,8 @@ int main(int argc, char* argv[]) {
 		asio::io_service io_service;
 		//server s(io_service, std::atoi(argv[1]));
 		io_service.run();
-	} catch (std::exception& e) {
+	}
+	catch (std::exception& e) {
 		std::cerr << "Exception: " << e.what() << "\n";
 	}
 	return 0;

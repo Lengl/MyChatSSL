@@ -150,10 +150,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Server.cpp" />
+    <ClInclude Include="..\chat_message.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\chat_message.h" />
+    <ClCompile Include="Server.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
