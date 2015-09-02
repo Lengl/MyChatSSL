@@ -87,7 +87,7 @@ public:
 		room(roomG) {
 	}
 
-	//Непонятно: что есть "нижний уровень"?
+	//What is "the lowest layer"?
 	sslSocket::lowest_layer_type& socket() {
 		return socket_.lowest_layer();
 	}
@@ -108,7 +108,7 @@ public:
 				asio::buffer(readMsg.data(), ChatMessage::headerLength),
 				boost::bind(
 					&session::handle_read_header,
-					//TODO:Выяснить, что же конкретно делает shared from this и как оно работает
+					//TODO: Get to kmow how "shared from this" works and what it does.
 					shared_from_this(),
 					asio::placeholders::error
 					));
@@ -151,7 +151,8 @@ public:
 	}
 
 	void deliver(const ChatMessage& msg) {
-		//Шайтан-система: Т.к. происходит асинхронная запись, то записывает он (практически) всё сразу, и "буфер пуст" === кольцо handle_write уже было запущено. А если не было - так запустим.
+		//Because wrie is async, he writes (almost) everything at once, 
+		//so "buffer is empty" === the cycle of "handle_write"'s already runs.
 		bool writeInProgress = !writeMsgs.empty();
 		writeMsgs.push_back(msg);
 		if (!writeInProgress) {
@@ -200,17 +201,17 @@ public:
 		context_.set_options(
 			ssl::context::default_workarounds
 			| ssl::context::no_sslv2
-			//Непонятно: что это значит и зачем?
+			//TODO: Why is this here? What for?
 			| ssl::context::single_dh_use);
 		context_.set_password_callback(boost::bind(&server::getPaswd, this));
 		context_.use_certificate_chain_file("server.crt");
-		//Непонятно: почему используется именно формат PEM, чем отличается от других, есть ли круче
+		//TODO: ask why it is PEM, what others are, why this is better (or not)
 		context_.use_private_key_file("server.key", ssl::context::pem);
 		context_.use_tmp_dh_file("dh512.pem");
 
 		start_accept();
 	}
-	//Непонятно: Не опасно ли этот пароль хранить в таком явном виде? И что это за пароль?
+	//TODO: What kind of paswd is this?
 	std::string getPaswd() const {
 		return "test";
 	}
